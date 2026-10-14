@@ -1,160 +1,153 @@
-# Assignment 1: PDF Page Search (Command-Line Tool)
+# PDF Question Answering CLI (RAG)
 
-**Name:** YUVRAJ_SINGH  **Roll No.:** 2024BTech150
+**Name:** Yuvraj Singh  **Roll No.:** 2024Btech150
 **Course:** LLMs (1 credit)
+**Assignment:** Assignment 3 - Convert the PDF search tool into a Retrieval-Augmented Generation (RAG) system
 
 ## Problem Statement
 
-> Select a PDF with a large number of pages (~100) with selectable text. Create a command-line tool that outputs the page number of the page (and the relevant text) that is most similar to a given query.
+> Continue building the command line tool and convert it into a RAG system. Instead of printing the most relevant chunk and similarity score, provide the (query, chunks) to a LLM and output the augmented prompt along with the generated response.
 
-## What This Tool Does
+## What is RAG?
 
-`pdf_search.py` takes a PDF and a text query, then prints the pages most similar to the query, with each page's number, a similarity score, and a snippet of the relevant text.
+A language model only knows what it saw in training, so it cannot answer questions about your PDF and may invent an answer. RAG fixes this in three steps:
 
-**Test document:** MAchine learning for absolute beginners, 179 pages, selectable text.
+1. **Retrieve** the passages of the document that are most relevant to the question.
+2. **Augment** the prompt by placing those passages next to the question.
+3. **Generate** an answer with the LLM, instructed to use only those passages.
 
-## How It Works
+This tool prints the augmented prompt (step 2) and the generated response (step 3), as the assignment asks.
 
+## Pipeline
+
+```text
+PDF -> page text -> sentence-aware chunks -> TF-IDF retrieval (top-k)
+    -> augmented prompt (rules + chunks + question) -> LLM -> answer + citation check
 ```
-PDF ──► text per page ──► TF-IDF vectors ──► cosine similarity vs. query ──► ranked pages
-        (PyMuPDF)         (scikit-learn)      (scikit-learn)                  + snippet
-```
 
-1. **Extract:** PyMuPDF reads each page's text and collapses extra whitespace. Page numbers start at 1 and match the PDF viewer.
-2. **Vectorize:** `TfidfVectorizer` turns every page into a vector of word weights.
-   - `stop_words="english"` drops common words such as *the* and *is*.
-   - `sublinear_tf=True` uses `1 + log(tf)`, so a word repeated 50 times does not dominate.
-   - `ngram_range=(1, 2)` counts two-word phrases, so *gradient descent* is a single feature.
-3. **Score:** The query is vectorized with the same vocabulary, and cosine similarity is computed against every page:
+1. **Extract:** PyMuPDF reads the selectable text and keeps each PDF page number.
+2. **Chunk:** Each page is split at sentence boundaries into chunks of about 150 words. Neighboring chunks share about 30 words (whole sentences) so ideas that cross a boundary are not lost. Chunks never cross pages, so every citation points to one page.
+3. **Retrieve:** Scikit-learn builds TF-IDF vectors (single words and two-word phrases) and ranks chunks by cosine similarity to the question. A small stemmer treats *predict*, *predicting* and *predictions* as the same word.
+4. **Augment:** The top chunks are numbered with their page and combined with the question and answering rules into one prompt.
+5. **Generate:** The OpenAI Python SDK sends a system instruction and the augmented prompt to Groq or Gemini through their OpenAI-compatible endpoints.
+6. **Verify:** The tool checks that every page the model cites was actually in the retrieved context, and warns if not.
 
-   ```
-   cosine(q, p) = (q · p) / (‖q‖ · ‖p‖)
-   ```
+## Improvements over the first version
 
-4. **Rank and display:** Pages are sorted by score, and pages with a score of 0 are skipped. For each result, the snippet is the window of text containing the most distinct query words, not just the start of the page.
+| Problem observed | Fix |
+|---|---|
+| Chunks were cut mid-sentence, e.g. ending in "...to solve for a (y-intercept) and" | Sentence-aware chunking with sentence-level overlap |
+| Tiny chunks (a quiz question, a one-line sentence) ranked high because cosine similarity favors short text | Pages and page-end leftovers under 30 words are skipped or merged into the previous chunk |
+| "predictions" did not match "predicting" or "prediction" | Light stemming in the TF-IDF analyzer |
+| The model added facts that were not in the retrieved text | Stricter prompt, low temperature (0.1), and a "do not use outside knowledge" rule |
+| LaTeX symbols appeared in terminal output | The prompt asks for plain-text formulas |
+| Hard to see why a chunk was retrieved | `--show-scores` prints page and similarity per chunk |
+| Could not test the prompt without spending API calls | `--dry-run` prints the augmented prompt only |
+| Answers could be cut off silently | Warning when the model hits the token limit |
 
 ## Setup
 
+Python 3.9 or newer is recommended.
+
 ```bash
-pip install pymupdf scikit-learn
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-Python 3.9+ is recommended (tested on Python 3.13, macOS).
+On Windows PowerShell, activate the environment with:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+## Configure an LLM provider
+
+The default provider is Groq. Gemini is also supported. Create an API key with the provider you want and set it in your terminal. Never put API keys in the source code or commit them to GitHub.
+
+```bash
+export GROQ_API_KEY="your-groq-key"        # default provider
+export GEMINI_API_KEY="your-gemini-key"    # only for --provider gemini
+```
+
+On Windows PowerShell, use `$env:GROQ_API_KEY="your-groq-key"`.
+
+| Provider | Default model |
+|---|---|
+| `groq` | `openai/gpt-oss-20b` |
+| `gemini` | `gemini-3.5-flash-lite` |
+
+API pricing, free-tier limits and model availability can change. Check the provider's console before use.
 
 ## Usage
 
 ```bash
-python pdf_search.py <pdf> "<query>" [--top-k N] [--snippet CHARS]
+python pdf_search.py PDF_FILE "your question" [options]
 ```
 
-| Argument | Default | Meaning |
-|---|---|---|
-| `pdf` | required | Path to a PDF with selectable text |
-| `query` | required | Search query |
-| `--top-k` | 3 | Number of matching pages to show |
-| `--snippet` | 500 | Approximate characters of text shown per page |
+```bash
+# Default (Groq)
+python pdf_search.py textbook.pdf "How does linear regression make predictions?"
 
-## Example Runs
+# Gemini
+python pdf_search.py textbook.pdf "How does linear regression make predictions?" --provider gemini
 
-All runs below use `textbook.pdf` (179 pages).
+# Show which chunks were retrieved and their scores
+python pdf_search.py textbook.pdf "What is a decision tree?" --show-scores
 
-### 1. Phrase query
+# Inspect the augmented prompt without calling the LLM
+python pdf_search.py textbook.pdf "What is a decision tree?" --dry-run
 
-```
-$ python pdf_search.py textbook.pdf "LINEAR REGRESSION" --top-k 3
-Loaded 179 pages from textbook.pdf
-
-Query: "LINEAR REGRESSION"
-============================================================
-#1  Page 53  (similarity: 0.2186)
-7 LINEAR REGRESSION As the "Hello World" of supervised learning algorithms, regression
-analysis is a simple technique for predicting an unknown variable using the results you do
-know. The first regression technique we'll examine is linear regression, which generates a
-straight line to describe linear relationships. ...
-------------------------------------------------------------
-#2  Page 57  (similarity: 0.2023)
-Figure 17: Using the slope/hyperplane to make a prediction While linear regression isn't a
-fail-proof method for predicting trends, ... Linear Regression Formula The formula [17] for
-linear regression is y = bx + a. ...
-------------------------------------------------------------
-#3  Page 60  (similarity: 0.1846)
-Having summarized simple linear regression using a single independent variable, we can now
-look at multiple linear regression. ...
-------------------------------------------------------------
+# Save the full run (prompt and answer) to a file
+python pdf_search.py textbook.pdf "Explain random forests" --save run1.md
 ```
 
-Page 53 is the first page of the linear regression chapter, so it is the correct top match. The query is matched case-insensitively.
+### Options
 
-### 2. Specific term
+| Option | Default | Description |
+|---|---:|---|
+| `pdf` | required | Path to a selectable-text PDF |
+| `query` | required | Question to answer using the PDF |
+| `--provider` | `groq` | `groq` or `gemini` |
+| `--model` | provider default | Override the model ID |
+| `--top-k` | `5` | Chunks passed to the LLM |
+| `--chunk-words` | `150` | Target words per chunk (chunks end at sentence boundaries) |
+| `--overlap-words` | `30` | Words repeated between neighboring chunks |
+| `--min-words` | `30` | Skip pages and page-end leftovers shorter than this |
+| `--temperature` | `0.1` | Low values give more factual answers |
+| `--max-tokens` | `800` | Maximum answer length |
+| `--show-scores` | off | Print page and similarity score of each retrieved chunk |
+| `--dry-run` | off | Print the augmented prompt and stop (no API key needed) |
+| `--save FILE` | off | Save the run as a Markdown file |
 
+## Example Run
+
+```text
+[Paste the full terminal output of your final run here: the augmented prompt and the generated response]
 ```
-$ python pdf_search.py textbook.pdf "gradient descent" --top-k 3
-Loaded 179 pages from textbook.pdf
-
-Query: "gradient descent"
-============================================================
-#1  Page 35  (similarity: 0.0882)
-...ries. While Scikit-learn offers a range of popular shallow algorithms, TensorFlow is
-the machine learning library of choice for deep learning/neural networks. It supports
-numerous advanced techniques including automatic calculus for back-propagation/gradient
-descent. ...
-------------------------------------------------------------
-#2  Page 131  (similarity: 0.0590)
-...HAPTER QUIZ ... 2) To train a quick benchmark model, gradient boosting is faster to
-train than random forests. ...
-------------------------------------------------------------
-#3  Page 132  (similarity: 0.0419)
-ANSWERS ... (Gradient boosting runs sequentially, making it slower to train. ...
-------------------------------------------------------------
-```
-
-This textbook mentions gradient descent only in passing (page 35). The tool finds that page, and the lower scores show the book has no dedicated section on it. Pages 131–132 match on the word *gradient* alone (gradient boosting).
-
-### 3. Natural-language question
-
-```
-$ python pdf_search.py textbook.pdf "how does a decision tree work?"
-Loaded 179 pages from textbook.pdf
-
-Query: "how does a decision tree work?"
-============================================================
-#1  Page 132  (similarity: 0.1230)
-ANSWERS 1) All variables except for body_mass_g (Tree-based techniques work well with both
-discrete and continuous variables ...) 3) A, Decision trees
-------------------------------------------------------------
-#2  Page 125  (similarity: 0.1169)
-...icks a variable that best partitions the data into homogenous groups. ... the greedy
-algorithm is oblivious to the future repercussions of its short-term actions. ...
-------------------------------------------------------------
-#3  Page 118  (similarity: 0.1143)
-Figure 55: Example of a regression tree Figure 56: Example of a classification tree Part
-of the appeal of decision trees is they can be displayed graphically and they are easy to
-explain to non-experts. ...
-------------------------------------------------------------
-```
-
-All three pages are from the decision-tree chapter. Page 132, a short quiz-answers page, ranks first (see Limitations).
 
 ## Design Choices
 
-- **TF-IDF over neural embeddings:** The tool runs fully offline, needs no API key, and is fast. A 179-page PDF is searched in about a second. Because it matches shared words, every result can be explained by the words in the snippet.
-- **Bigrams:** Phrases like *linear regression* and *decision tree* are matched as units, which improves ranking over single words.
-- **Query-centered snippets:** The snippet is chosen around the query words, so the output shows the relevant text instead of the first lines of the page.
-- **Input checks:** The tool exits with a clear message for a missing file, a non-PDF file, a PDF with no selectable text (scanned images), or a query with no words found in the PDF.
+- **TF-IDF retrieval:** It is fast, runs offline, and every retrieved chunk can be explained by the words it shares with the question. It was also the retriever built in Assignment 1.
+- **Page-bounded chunks:** Citations always refer to a single PDF page.
+- **Context before question:** The prompt places the passages first and the question last, which helps the model focus on the question.
+- **Citation check:** Page numbers cited by the model are compared with the retrieved pages, so invented citations are caught.
+- **Keys in environment variables:** Keys never appear in the code or the repository.
 
 ## Limitations
 
-- **Exact words only:** TF-IDF does not understand meaning. A paraphrase such as "how do networks learn from mistakes?" will not match a page that says "back-propagation" unless the words overlap. Embedding-based search would handle this better.
-- **Short pages can win:** In run 3, a short quiz-answers page (132) outranked the explanatory pages because cosine similarity favors pages where query words make up a large share of the text. Filtering out very short pages would help.
-- **Low absolute scores:** Scores such as 0.09 are normal for TF-IDF with bigrams over many pages. Only the ranking matters, and scores should not be read as percentages.
-- **Scanned PDFs are not supported** because there is no OCR step.
+- TF-IDF matches words, not meaning. A question phrased with different vocabulary from the textbook may retrieve weak chunks. Embedding-based retrieval would handle this better.
+- The answer can only be as complete as the retrieved chunks. Raising `--top-k` adds context but also sends more text to the provider.
+- The stemmer is simple and will occasionally merge or miss word forms.
+- The tool needs internet access and a valid API key to generate answers, and it does not perform OCR on scanned PDFs.
+- LLM output is generated text. Check it against the retrieved context printed above the answer.
 
 ## Files
 
-```
+```text
 assignment-1-pdf-search/
-├── pdf_search.py   # the tool
-└── README.md
+├── pdf_search.py     # chunking, TF-IDF retrieval, prompt construction, LLM call
+├── requirements.txt  # pymupdf, scikit-learn, openai
+├── README.md         # setup, usage and RAG explanation
+└── textbook.pdf      # local test PDF; excluded from Git
 ```
-
-The test PDF is not included because of its size and copyright.
